@@ -156,17 +156,20 @@ export class WaterMaterial extends Material {
 		const SH = !! S.shore;
 		const SIM = !! S.shoreSim;
 		const SF = !! S.surfFoam;
-		const CL = !! ( this.clouds && this.clouds.module );
+		const limit16 = ( GPU.limits?.maxSampledTexturesPerShaderStage || 16 ) <= 16;
+		const CL = !! ( this.clouds && ( this.clouds.shadowModule || this.clouds.module ) );
+		const CL_SHADOW = ! limit16 && CL;
 		const HULL = !! ( this.hullMaskTexture && this.hullMaskActive );
 		const REFL = !! ( this.reflection && this.reflection.module );
+		const REFR = ! limit16 && !! this.refraction;
 
-		this.modules = [ commonModule, waterFresnelModule, waterHelpersModule, whaleWaterModule, S.module, sky && sky.module, CL && this.clouds.module,
+		this.modules = [ commonModule, waterFresnelModule, waterHelpersModule, whaleWaterModule, S.module, sky && ( sky.reflectionModule || sky.module ), CL_SHADOW && ( this.clouds.shadowModule || this.clouds.module ),
 			SIM && S.shoreSim.module, REFL && this.reflection.module, this.cameraWaterHeightNode && this.cameraWaterHeightNode.module ].filter( Boolean );
 		this.bindings.waterSceneColor = { texture: this.sceneColorTexture };
 		this.bindings.waterSceneDepth = { texture: this.sceneDepthTexture, sampleType: 'unfilterable-float' };
-		if ( this.sceneDepthHalfTexture ) this.bindings.waterSceneDepthHalf = { texture: this.sceneDepthHalfTexture };
-		this.setDefine( 'WATER_DEPTH_HALF', this.sceneDepthHalfTexture ? 1 : 0 );
-		const REFR = !! this.refraction;
+		const useDepthHalf = this.sceneDepthHalfTexture && ! limit16;
+		if ( useDepthHalf ) this.bindings.waterSceneDepthHalf = { texture: this.sceneDepthHalfTexture };
+		this.setDefine( 'WATER_DEPTH_HALF', useDepthHalf ? 1 : 0 );
 		if ( REFR ) {
 
 			this.bindings.waterRefrColor = { texture: this.refraction.texture };
@@ -201,6 +204,8 @@ export class WaterMaterial extends Material {
 	_shadeWGSL( { T, SH, SIM, SF, CL, HULL, REFL } ) {
 
 		const S = this.waterSurface;
+		const limit16 = ( GPU.limits?.maxSampledTexturesPerShaderStage || 16 ) <= 16;
+		const CL_SHADOW = ! limit16 && CL;
 		// the ShoreWaves module always provides shoreCrestPath / shoreSurfMedium (WGSL; the TSL-era
 		// guards on JS methods of the same names were always false in the port)
 		const hasCrest = SH;
@@ -237,8 +242,8 @@ export class WaterMaterial extends Material {
 	// x the island's own shadow (heightfield horizon: the shadow map's range is too short to hold it)
 	// (5-tap PCF: the waves break up any penumbra detail the contact-hardening filter would add)
 	var sunLight = frame.sunColor * sunShadowPCF( pos, vec3f( 0.0, 1.0, 0.0 ), in.pixel );
-${ CL ? '	sunLight *= cloudsShadow( pos.xz );' : '' }
-${ T ? '	sunLight *= terrainSunShadowAt( pos );' : '' }
+${ CL_SHADOW ? '	sunLight *= cloudsShadow( pos.xz );' : '' }
+${ ( T && ! limit16 ) ? '	sunLight *= terrainSunShadowAt( pos );' : '' }
 
 	// water film thickness at this pixel and the distance to the swash front (ShoreWaves.swashEdge):
 	// the sheet ends exactly on its analytic leading edge, not on the mesh triangles
@@ -324,7 +329,7 @@ ${ SH ? '	let folded = surf.jacobian < 0.1 || normalize( in.vs.vShoreN ).y < 0.3
 		// near the leading edge the surface bends down to meet the sand like a rounded bead
 		// (meniscus), tilting the normal toward dry land
 		let edgeW = max( ( 1.0 - smoothstep( 0.0, 0.006, thickness ) ) * uprush, lipW );
-		let nr = ${ T ? 'terrainNormalRock( pos.xz )' : 'vec4f( 0.0 )' };
+		let nr = ${ ( T && ! limit16 ) ? 'terrainNormalRock( pos.xz )' : 'vec4f( 0.0 )' };
 		let uphill = normalize( - vec2f( nr.x, nr.y ) + vec2f( 1e-5, 0.0 ) );
 		let N = normalize( Nview + vec3f( uphill.x, 0.0, uphill.y ) * ( edgeW * edgeW * 0.7 ) );
 		let NdV = max( dot( N, V ), 1e-4 );

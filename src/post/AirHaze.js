@@ -211,13 +211,12 @@ export class AirHaze {
 
 	}
 
-	// the helpers shared by the passes and the composite
-	get module() {
+	get baseModule() {
 
-		if ( this._module ) return this._module;
-		this._module = new ShaderModule( {
-			name: 'haze',
-			deps: this._deps(),
+		if ( this._baseModule ) return this._baseModule;
+		this._baseModule = new ShaderModule( {
+			name: 'haze-base',
+			deps: [ commonModule, this.uw.baseModule || this.uw.module ],
 			uniforms: this.uniforms,
 			uniformName: 'hazeParams',
 			bindings: {
@@ -269,7 +268,21 @@ fn hazeRay( uv: vec2f ) -> HazeRay {
 	r.dir = normalize( ( underwaterParams.camWorld * vec4f( ray, 0.0 ) ).xyz );
 	return r;
 }
+`,
+		} );
+		return this._baseModule;
 
+	}
+
+	// the helpers used for raymarching and shadows
+	get module() {
+
+		if ( this._module ) return this._module;
+		const hard = shadowModule.code.includes( 'fn sunShadowHard' ) ? shadowModule : hardShadowFallback;
+		this._module = new ShaderModule( {
+			name: 'haze',
+			deps: [ this.baseModule, this.clouds && this.clouds.module, this.terrain && this.terrain.module, hard ].filter( Boolean ),
+			code: /* wgsl */`
 // the march's hill shadow: terrainSunShadowAt with one filtered fetch instead of four loads (the
 // texture is half float, filterable; the materials keep the loads: they are short of samplers)
 fn hazeTerrainSun( P: vec3f ) -> f32 {
@@ -328,7 +341,7 @@ fn hazeVisibility( P: vec3f ) -> f32 {
 		if ( this._compositeModule ) return this._compositeModule;
 		this._compositeModule = new ShaderModule( {
 			name: 'haze-composite',
-			deps: [ this.module ],
+			deps: [ this.baseModule, this.atmosphere && this.atmosphere.module, this.sky && ( this.sky.moonSkyModule || this.sky.module ) ].filter( Boolean ),
 			bindings: {
 				hazeLow: { texture: () => this.hist[ this._hc ].texture },
 				hazeSS: { texture: () => this.ssShafts.texture },
@@ -493,7 +506,7 @@ fn fragment( in: FSIn ) -> vec4f {
 		// cloud transmittance in that direction
 		const mask = new FullscreenPass( {
 			label: 'haze sun mask',
-			modules: [ mod ],
+			modules: [ this.baseModule, this.clouds && this.clouds.module ].filter( Boolean ),
 			defines,
 			colorFormats: [ 'r16float' ],
 			code: /* wgsl */`
@@ -535,7 +548,7 @@ fn fragment( in: FSIn ) -> vec4f {
 
 			return new FullscreenPass( {
 				label: 'haze god rays ' + p,
-				modules: [ mod ],
+				modules: [ this.baseModule ],
 				bindings: { hzSrc: { texture: () => this.ssTargets[ p ].texture } },
 				colorFormats: [ 'r16float' ],
 				code: /* wgsl */`
@@ -564,7 +577,7 @@ ${ taps }
 		// neighbourhood, blended with the new march
 		const temporal = [ 0, 1 ].map( ( src ) => new FullscreenPass( {
 			label: 'haze shafts temporal',
-			modules: [ mod ],
+			modules: [ this.baseModule ],
 			defines,
 			bindings: { hzCur: { texture: () => this.low.texture }, hzPrev: { texture: () => this.hist[ src ].texture } },
 			colorFormats: [ 'rgba16float' ],

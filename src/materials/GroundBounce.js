@@ -150,7 +150,7 @@ ${ taps }	textureStore( gbMapOut, vec2u( gid.xy ), sum );
 
 	GroundBounce.module = new ShaderModule( {
 		name: 'hook-bounce',
-		deps: [ commonModule, terrain.module, ...( clouds && clouds.module ? [ clouds.module ] : [] ) ],
+		deps: [ commonModule, terrain.sunShadowModule || terrain.module, ...( clouds && ( clouds.shadowModule || clouds.module ) ? [ clouds.shadowModule || clouds.module ] : [] ) ],
 		uniforms: params,
 		uniformName: 'groundBounceParams',
 		bindings: { groundBounceMap: { texture: map, sampleType: 'unfilterable-float' } },

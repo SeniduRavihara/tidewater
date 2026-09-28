@@ -98,26 +98,63 @@ export class TerrainGPU {
 		if ( shoreField ) this.setShoreField( shoreField );
 		this._initSunShadow();
 
-		this.module = new ShaderModule( {
-			name: 'terrain',
+		this.sunShadowModule = new ShaderModule( {
+			name: 'terrainSunShadow',
 			deps: [ commonModule ],
+			uniforms: this.uniforms,
+			uniformName: 'terrainParams',
+			bindings: {
+				terrainSunShadowTex: { texture: this.sunShadowTexture },
+			},
+			code: /* wgsl */`
+fn terrainUvOf( xz: vec2f ) -> vec2f {
+	return ( xz - terrainParams.origin ) / terrainParams.size;
+}
+
+fn terrainSunShadowAt( P: vec3f ) -> f32 {
+	let N = f32( textureDimensions( terrainSunShadowTex ).x );
+	let st = clamp( terrainUvOf( P.xz ) * N - 0.5, vec2f( 0.0 ), vec2f( N - 1.001 ) );
+	let i = vec2i( floor( st ) );
+	let t = fract( st );
+	let s = mix(
+		mix( textureLoad( terrainSunShadowTex, i, 0 ), textureLoad( terrainSunShadowTex, i + vec2i( 1, 0 ), 0 ), t.x ),
+		mix( textureLoad( terrainSunShadowTex, i + vec2i( 0, 1 ), 0 ), textureLoad( terrainSunShadowTex, i + vec2i( 1, 1 ), 0 ), t.x ),
+		t.y
+	);
+	let w = s.y * 0.012 + 0.35;
+	return mix( 1.0, smoothstep( -w, w, P.y - s.x ), terrainParams.sunBaked );
+}
+`,
+		} );
+
+		this.surfaceModule = new ShaderModule( {
+			name: 'terrainSurface',
+			deps: [ commonModule, this.sunShadowModule ],
 			uniforms: this.uniforms,
 			bindings: {
 				terrainHeightTex: { texture: this.heightTexture, sampleType: 'unfilterable-float' },
 				terrainNormalTex: { texture: this.normalTexture },
+				terrainShoreTex: { texture: () => this.shoreTexture, sampleType: 'unfilterable-float' },
+			},
+			code: TERRAIN_SURFACE_WGSL,
+		} );
+
+		this.module = new ShaderModule( {
+			name: 'terrain',
+			deps: [ commonModule, this.surfaceModule ],
+			uniforms: this.uniforms,
+			bindings: {
 				terrainSplatTex: { texture: this.splatTexture },
 				terrainDetailTex: detailBinding(),
-				terrainShoreTex: { texture: () => this.shoreTexture, sampleType: 'unfilterable-float' },
-				terrainSunShadowTex: { texture: this.sunShadowTexture },
 			},
-			code: TERRAIN_WGSL,
+			code: TERRAIN_SPLAT_WGSL,
 		} );
 
 		// the former TerrainLightingModel: multiplies the key light by the heightfield sun shadow.
 		// Materials add it to `modules` and set the define MATERIAL_SUN_MODULATION: 1.
 		this.sunModulationModule = new ShaderModule( {
 			name: 'terrainSunModulation',
-			deps: [ this.module ],
+			deps: [ this.sunShadowModule ],
 			code: 'fn materialSunModulation( P: vec3f, N: vec3f ) -> vec3f { return vec3f( terrainSunShadowAt( P ) ); }',
 		} );
 
@@ -217,11 +254,7 @@ fn main( @builtin( global_invocation_id ) gid: vec3u ) {
 
 }
 
-const TERRAIN_WGSL = /* wgsl */`
-fn terrainUvOf( xz: vec2f ) -> vec2f {
-	return ( xz - terrainParams.origin ) / terrainParams.size;
-}
-
+const TERRAIN_SURFACE_WGSL = /* wgsl */`
 // exact bilinear height at world xz (matches TerrainData.heightAt)
 fn terrainHeightAt( xz: vec2f ) -> f32 {
 	let res = terrainParams.res;
@@ -255,15 +288,6 @@ fn terrainNormalAt( xz: vec2f ) -> vec3f {
 	return normalize( vec3f( nr.x, sqrt( max( 1.0 - nr.x * nr.x - nr.y * nr.y, 0.0025 ) ), nr.y ) );
 }
 
-// loose sand, worn ground / paths, gullies (land) or seagrass (seabed), seabed rubble (the
-// eroded beach scarp face on land)
-fn terrainSplat( xz: vec2f ) -> vec4f {
-	return textureSample( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ) );
-}
-fn terrainSplatLevel( xz: vec2f, level: f32 ) -> vec4f {
-	return textureSampleLevel( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ), level );
-}
-
 // shore field: (T, dirX, dirZ, exposure), bilinear via loads (float32 data)
 fn terrainShoreSample( xz: vec2f ) -> vec4f {
 	let res = terrainParams.shoreRes;
@@ -279,20 +303,15 @@ fn terrainShoreSample( xz: vec2f ) -> vec4f {
 	let d = textureLoad( terrainShoreTex, min( ii + vec2i( 1, 1 ), mx ), 0 );
 	return mix( mix( a, b, t.x ), mix( c, d, t.x ), t.y );
 }
+`;
 
-// 0 (in the terrain's shadow) .. 1 (lit) for a world position, soft penumbra that widens with the
-// occluder distance
-fn terrainSunShadowAt( P: vec3f ) -> f32 {
-	let N = f32( textureDimensions( terrainSunShadowTex ).x );
-	let st = clamp( terrainUvOf( P.xz ) * N - 0.5, vec2f( 0.0 ), vec2f( N - 1.001 ) );
-	let i = vec2i( floor( st ) );
-	let t = fract( st );
-	let s = mix(
-		mix( textureLoad( terrainSunShadowTex, i, 0 ), textureLoad( terrainSunShadowTex, i + vec2i( 1, 0 ), 0 ), t.x ),
-		mix( textureLoad( terrainSunShadowTex, i + vec2i( 0, 1 ), 0 ), textureLoad( terrainSunShadowTex, i + vec2i( 1, 1 ), 0 ), t.x ),
-		t.y
-	);
-	let w = s.y * 0.012 + 0.35;
-	return mix( 1.0, smoothstep( -w, w, P.y - s.x ), terrainParams.sunBaked );
+const TERRAIN_SPLAT_WGSL = /* wgsl */`
+// loose sand, worn ground / paths, gullies (land) or seagrass (seabed), seabed rubble (the
+// eroded beach scarp face on land)
+fn terrainSplat( xz: vec2f ) -> vec4f {
+	return textureSample( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ) );
+}
+fn terrainSplatLevel( xz: vec2f, level: f32 ) -> vec4f {
+	return textureSampleLevel( terrainSplatTex, smpLinearClamp, terrainUvOf( xz ), level );
 }
 `;

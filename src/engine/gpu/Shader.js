@@ -99,8 +99,9 @@ export function preprocess( code, defines = {} ) {
 		if ( ( m = /^!\s*(\w+)$/.exec( expr ) ) ) return ! truthy( defines[ m[ 1 ] ] );
 		if ( ( m = /^(\w+)\s*(==|!=|>=|<=|>|<)\s*([\w.'"-]+)$/.exec( expr ) ) ) {
 
-			const a = defines[ m[ 1 ] ];
+			let a = defines[ m[ 1 ] ];
 			let b = m[ 3 ].replace( /^['"]|['"]$/g, '' );
+			if ( a === undefined && ! isNaN( Number( b ) ) ) a = 0;
 			if ( ! isNaN( Number( b ) ) && typeof a === 'number' ) b = Number( b );
 			switch ( m[ 2 ] ) {
 
@@ -238,13 +239,13 @@ function describe( name, spec, stage ) {
 	if ( spec.texture ) {
 
 		const t = resolve( spec.texture );
-		const dim = spec.viewDimension || spec.view?.dimension || t.defaultViewDimension;
-		let sampleType = spec.sampleType || t.sampleType;
-		let wgsl = spec.wgslType || t.wgslType( dim );
+		const dim = spec.viewDimension || spec.view?.dimension || t?.defaultViewDimension || '2d';
+		let sampleType = spec.sampleType || t?.sampleType || 'float';
+		let wgsl = spec.wgslType || ( t ? t.wgslType( dim ) : `texture_${ dim.replace( '-', '_' ) }<f32>` );
 		// depth read as plain float (textureLoad / manual compare)
-		if ( spec.sampleType === 'unfilterable-float' && t.isDepth ) wgsl = `texture_${ dim.replace( '-', '_' ) }<f32>`;
+		if ( spec.sampleType === 'unfilterable-float' && ( t ? t.isDepth : false ) ) wgsl = `texture_${ dim.replace( '-', '_' ) }<f32>`;
 		return {
-			layout: { visibility: vis, texture: { sampleType, viewDimension: dim, multisampled: t.sampleCount > 1 } },
+			layout: { visibility: vis, texture: { sampleType, viewDimension: dim, multisampled: ( t ? t.sampleCount : 1 ) > 1 } },
 			decl: `var ${ name }: ${ wgsl };`,
 		};
 
@@ -530,20 +531,32 @@ export function composeShader( { modules = [], bindings = {}, code = '', defines
 	for ( const k in bindings ) specs[ k ] = bindings[ k ];
 	let stageOf = null;
 	let demote = null;
+	let prunedCode = null;
 	if ( stage === 'render' && /@vertex\s+fn\s+vs\b/.test( code ) ) {
 
 		// bindings only one entry point can reach are declared for that stage only (per-stage limits:
 		// 12 uniform buffers, 16 sampled textures on some adapters)
 		let all = '';
-		for ( const m of mods ) all += m.code + '\n';
+		for ( const m of mods ) all += `// ---- ${ m.name }\n${ m.code }\n`;
 		const full = preprocess( all + code, defines );
-		const usedV = reachableIdentifiers( full, 'vs' );
-		const usedF = /@fragment\s+fn\s+fs\b/.test( full ) ? reachableIdentifiers( full, 'fs' ) : null;
+		const hasFs = /@fragment\s+fn\s+fs\b/.test( full );
+		const pruned = pruneUnreachable( full, hasFs ? [ 'vs', 'fs' ] : [ 'vs' ] );
+		prunedCode = pruned.code;
+		const usedV = reachableIdentifiers( prunedCode, 'vs' );
+		const usedF = hasFs ? reachableIdentifiers( prunedCode, 'fs' ) : null;
 		stageOf = {};
 		for ( const k in specs ) {
 
-			if ( ! usedV.has( k ) && ( ! usedF || usedF.has( k ) ) ) stageOf[ k ] = 'fragment';
-			else if ( usedF && ! usedF.has( k ) && usedV.has( k ) ) stageOf[ k ] = 'vertex';
+			const inV = usedV.has( k );
+			const inF = usedF ? usedF.has( k ) : false;
+			if ( ! inV && ! inF ) {
+
+				delete specs[ k ];
+				continue;
+
+			}
+			if ( ! inV ) stageOf[ k ] = 'fragment';
+			else if ( ! inF ) stageOf[ k ] = 'vertex';
 
 		}
 
@@ -575,6 +588,7 @@ export function composeShader( { modules = [], bindings = {}, code = '', defines
 
 	}
 
+
 	const set = new BindingSet( specs, stage, label + '.g1', stageOf, demote );
 	const g0 = group0( stage );
 	const structs = [ ...new Set( [ ...g0.structs(), ...set.structs() ] ) ];
@@ -588,9 +602,77 @@ export function composeShader( { modules = [], bindings = {}, code = '', defines
 	src += structs.map( ( s ) => s.wgsl ).join( '\n' ) + '\n';
 	src += g0.declarations( 0 ) + '\n';
 	src += set.declarations( 1 ) + '\n';
+	if ( prunedCode !== null ) {
+
+		src += prunedCode;
+		return { code: src, bindings: set, group0: g0, modules: mods };
+
+	}
+
 	for ( const m of mods ) src += `// ---- ${ m.name }\n${ m.code }\n`;
 	src += code;
 	return { code: preprocess( src, defines ), bindings: set, group0: g0, modules: mods };
+
+}
+
+// Prunes functions that cannot be reached from the given entry points.
+export function pruneUnreachable( src, entries = [ 'vs', 'fs' ] ) {
+
+	const fns = [];
+	const re = /\bfn\s+([A-Za-z_]\w*)\s*\(/g;
+	let m;
+	while ( ( m = re.exec( src ) ) ) {
+
+		const name = m[ 1 ];
+		const open = src.indexOf( '{', m.index );
+		if ( open < 0 ) break;
+		let depth = 0, i = open;
+		for ( ; i < src.length; i ++ ) {
+
+			const c = src[ i ];
+			if ( c === '{' ) depth ++;
+			else if ( c === '}' && -- depth === 0 ) break;
+
+		}
+
+		const end = i + 1;
+		const isEntry = /@(vertex|fragment|compute)[^;{}]*$/.test( src.slice( Math.max( 0, m.index - 80 ), m.index ) );
+		let start = m.index;
+		const before = src.slice( Math.max( 0, m.index - 80 ), m.index );
+		const attrMatch = /(?:@\w+(?:\([^)]*\))?\s*)+$/.exec( before );
+		if ( attrMatch ) start = m.index - attrMatch[ 0 ].length;
+
+		fns.push( { name, start, end, isEntry, body: src.slice( m.index, end ) } );
+		re.lastIndex = end;
+
+	}
+
+	const fnMap = new Map( fns.map( ( f ) => [ f.name, f ] ) );
+	const reachable = new Set();
+	const queue = entries.filter( ( e ) => fnMap.has( e ) );
+	while ( queue.length ) {
+
+		const name = queue.pop();
+		if ( reachable.has( name ) || ! fnMap.has( name ) ) continue;
+		reachable.add( name );
+		const f = fnMap.get( name );
+		for ( const id of f.body.match( /[A-Za-z_]\w*/g ) || [] ) {
+
+			if ( fnMap.has( id ) && ! reachable.has( id ) ) queue.push( id );
+
+		}
+
+	}
+
+	let pruned = src;
+	const toRemove = fns.filter( ( f ) => ! f.isEntry && ! reachable.has( f.name ) ).sort( ( a, b ) => b.start - a.start );
+	for ( const f of toRemove ) {
+
+		pruned = pruned.slice( 0, f.start ) + '/* pruned ' + f.name + ' */' + pruned.slice( f.end );
+
+	}
+
+	return { code: pruned, reachable };
 
 }
 

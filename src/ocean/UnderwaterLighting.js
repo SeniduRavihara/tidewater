@@ -47,8 +47,8 @@ export function installUnderwaterLighting( { fft, caustics, clouds = null, terra
 
 	const T = !! terrain;
 	const S = !! ( shore && terrain );
-	const deps = [ commonModule, surfaceModule, fft.module, terrain && terrain.module, S && shore.module, shoreSim && shoreSim.module,
-		caustics && caustics.module, clouds && clouds.module, surface && surface.attenuationModule ];
+	const deps = [ commonModule, fft.module, terrain && terrain.module, S && shore.module, shoreSim && shoreSim.module,
+		caustics && caustics.detail ? caustics.detail.module : null, surface && surface.attenuationModule ].filter( Boolean );
 
 	const C3 = Math.min( 3, fft.cascades ), C2 = Math.min( 2, fft.cascades );
 
@@ -106,6 +106,11 @@ fn underwaterMeanLevel( xz: vec2f ) -> f32 {
 ${ T ? '	h *= smoothstep( 0.0, 3.0, frame.seaLevel - terrainHeightAt( xz ) );' : '' }
 	return frame.seaLevel + h;
 }
+
+fn causticsDetailK( xz: vec2f ) -> f32 {
+${ caustics && caustics.detail ? `	let det = seaDetailSample( xz );
+	return mix( 0.55, 1.25, det.gust ) * ( 1.0 - det.slick * 0.6 );` : '	return 1.0;' }
+}
 `,
 	} );
 
@@ -129,7 +134,7 @@ ${ T ? '	h *= smoothstep( 0.0, 3.0, frame.seaLevel - terrainHeightAt( xz ) );' :
 		const A = make( 'uwWaves' + l ), B = make( 'uwLevel' + l );
 		const kernel = new ComputeKernel( {
 			label: 'Underwater Light Map ' + l,
-			modules: [ helpers, ...( caustics && caustics.module ? [ caustics.module ] : [] ) ],
+			modules: [ helpers ],
 			bindings: { uwMapParams: { uniform: mapParams }, uwOutA: { storageTexture: A, access: 'write' }, uwOutB: { storageTexture: B, access: 'write' } },
 			workgroupSize: [ 8, 8, 1 ],
 			code: /* wgsl */`
@@ -138,7 +143,7 @@ fn main( @builtin( global_invocation_id ) gid: vec3u ) {
 	let xz = ( vec2f( gid.xy ) + 0.5 ) * ${ texel } + uwMapParams.origin${ l };
 	let lw = underwaterLongWaves( xz, ${ texel } );
 	textureStore( uwOutA, vec2u( gid.xy ), vec4f( lw.height - frame.seaLevel, lw.slope, sat( lw.foam ) ) );
-	let dk = ${ caustics && caustics.module ? 'causticsDetailK( xz )' : '1.0' };
+	let dk = causticsDetailK( xz );
 	textureStore( uwOutB, vec2u( gid.xy ), vec4f( underwaterMeanLevel( xz ) - frame.seaLevel, dk, 0.0, 1.0 ) );
 }
 `,
@@ -210,7 +215,7 @@ fn _uwMapLookup( xz: vec2f, waves: bool ) -> UwMapSample {
 	};
 
 	// the hooks bind only the maps (+ caustics, clouds, terrain hill shadow)
-	const hookDeps = [ commonModule, surfaceModule, mapModule, caustics && caustics.module, clouds && clouds.module, terrain && terrain.module ].filter( Boolean );
+	const hookDeps = [ commonModule, surfaceModule, mapModule, caustics && caustics.module, clouds && ( clouds.shadowModule || clouds.module ), terrain && ( terrain.sunShadowModule || terrain.module ) ].filter( Boolean );
 
 	const direct = new ShaderModule( {
 		name: 'hook-directModulation-underwater',

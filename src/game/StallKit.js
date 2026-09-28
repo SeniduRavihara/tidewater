@@ -146,6 +146,7 @@ fn skBump( P: vec3f, N: vec3f, h: f32 ) -> vec3f {
 export function createStallMaterial( assets ) {
 
 	const m = standard( {
+		underwaterLighting: 'none',
 		vertexColors: true,
 		modules: [ kitModule ],
 		attributes: { aLayer: 'f32', aUV2: 'vec2f' },

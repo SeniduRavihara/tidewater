@@ -213,7 +213,7 @@ export class ShoreWaves {
 
 		this.module = new ShaderModule( {
 			name: 'shore',
-			deps: [ commonModule, terrainGPU && terrainGPU.module ],
+			deps: [ commonModule, terrainGPU && ( terrainGPU.surfaceModule || terrainGPU.module ) ],
 			uniforms: this.uniforms,
 			uniformName: 'shoreP',
 			bindings: {

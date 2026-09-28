@@ -130,7 +130,7 @@ export class OceanFFT {
 		this.foam = new StorageBuffer( { label: 'fftFoam', count: total, type: 'f32' } );
 		// level 0 of both textures (interleaved) for the compute mip chain, and the 8x8 level 5
 		this.mipSrc = new StorageBuffer( { label: 'fftMipSrc', count: total * 2, type: 'vec4f' } );
-		this.mipMid = new StorageBuffer( { label: 'fftMipMid', count: 64 * C * 2, type: 'vec4f' } );
+		this.mipMid = new StorageBuffer( { label: 'fftMipMid', count: 256 * C * 2, type: 'vec4f' } );
 
 		const makeTex = ( name ) => new Texture( {
 			label: name, width: N, height: N, depth: C, dimension: '2d-array', format: 'rgba16float',
@@ -536,7 +536,7 @@ ${ stages }
 			const w2 = width * 2;
 			let dst = '';
 			if ( to ) dst = `${ to }[ ly * ${ width }u + lx ] = v;`;
-			else if ( lvl === 5 ) dst = `mipMid[ ( c * 64u + gy * 8u + gx ) * 2u + ${ t }u ] = v;`;
+			else if ( lvl === 4 ) dst = `mipMid[ ( c * 256u + ( gy * 2u + ly ) * 16u + ( gx * 2u + lx ) ) * 2u + ${ t }u ] = v;`;
 			return /* wgsl */`
 	if ( lx < ${ width }u && ly < ${ width }u ) {
 		let i = ly * ${ 2 * w2 }u + lx * 2u;
@@ -551,14 +551,13 @@ ${ stages }
 			label: 'Ocean Mips A',
 			bindings: {
 				mipSrc: rw( this.mipSrc ), mipMid: rw( this.mipMid ),
-				out1: level( tex, 1 ), out2: level( tex, 2 ), out3: level( tex, 3 ), out4: level( tex, 4 ), out5: level( tex, 5 ),
+				out1: level( tex, 1 ), out2: level( tex, 2 ), out3: level( tex, 3 ), out4: level( tex, 4 ),
 			},
 			workgroupSize: [ 16, 16, 1 ],
 			code: /* wgsl */`
 var<workgroup> s1: array<vec4f, 256>;
 var<workgroup> s2: array<vec4f, 64>;
 var<workgroup> s3: array<vec4f, 16>;
-var<workgroup> s4: array<vec4f, 4>;
 fn src( c: u32, x: u32, y: u32 ) -> vec4f { return mipSrc[ ( c * ${ N * N }u + y * ${ N }u + x ) * 2u + ${ t }u ]; }
 @compute @workgroup_size( WG_X, WG_Y, WG_Z )
 fn main( @builtin( local_invocation_id ) lid: vec3u, @builtin( workgroup_id ) wid: vec3u ) {
@@ -574,17 +573,16 @@ ${ reduce( 's1', 's2', 8, 2, t ) }
 	workgroupBarrier();
 ${ reduce( 's2', 's3', 4, 3, t ) }
 	workgroupBarrier();
-${ reduce( 's3', 's4', 2, 4, t ) }
-	workgroupBarrier();
-${ reduce( 's4', null, 1, 5, t ) }
+${ reduce( 's3', null, 2, 4, t ) }
 }`,
 		} );
 
 		const mipB = ( tex, t ) => new ComputeKernel( {
 			label: 'Ocean Mips B',
-			bindings: { mipMid: rw( this.mipMid ), out6: level( tex, 6 ), out7: level( tex, 7 ), out8: level( tex, 8 ) },
-			workgroupSize: [ 8, 8, 1 ],
+			bindings: { mipMid: rw( this.mipMid ), out5: level( tex, 5 ), out6: level( tex, 6 ), out7: level( tex, 7 ), out8: level( tex, 8 ) },
+			workgroupSize: [ 16, 16, 1 ],
 			code: /* wgsl */`
+var<workgroup> s4: array<vec4f, 256>;
 var<workgroup> s5: array<vec4f, 64>;
 var<workgroup> s6: array<vec4f, 16>;
 var<workgroup> s7: array<vec4f, 4>;
@@ -592,7 +590,9 @@ var<workgroup> s7: array<vec4f, 4>;
 fn main( @builtin( local_invocation_id ) lid: vec3u, @builtin( workgroup_id ) wid: vec3u ) {
 	let lx = lid.x; let ly = lid.y; let c = wid.z;
 	let gx = 0u; let gy = 0u;
-	s5[ ly * 8u + lx ] = mipMid[ ( c * 64u + ly * 8u + lx ) * 2u + ${ t }u ];
+	s4[ ly * 16u + lx ] = mipMid[ ( c * 256u + ly * 16u + lx ) * 2u + ${ t }u ];
+	workgroupBarrier();
+${ reduce( 's4', 's5', 8, 5, t ) }
 	workgroupBarrier();
 ${ reduce( 's5', 's6', 4, 6, t ) }
 	workgroupBarrier();

@@ -128,42 +128,18 @@ export class Underwater {
 
 	}
 
-	// the shader module (built on first use: the other systems' modules must exist by then)
-	get module() {
+	get baseModule() {
 
-		if ( this._module ) return this._module;
-		this._module = new ShaderModule( {
-			name: 'underwater',
-			deps: [ commonModule, this.query && this.query.module, this.caustics && this.caustics.module, flashModule ],
+		if ( this._baseModule ) return this._baseModule;
+		this._baseModule = new ShaderModule( {
+			name: 'underwater-base',
+			deps: [ commonModule, this.query && ( this.query.resultsModule || this.query.module ) ].filter( Boolean ),
 			uniforms: this.uniforms,
 			uniformName: 'underwaterParams',
 			bindings: {
 				underwaterDepth: { texture: () => this.depthTexture },
-				underwaterMask: { texture: () => this.maskTexture },
 			},
-			code: this._code(),
-		} );
-		return this._module;
-
-	}
-
-	// the composite (needs the medium texture: not usable by the medium pass itself)
-	get compositeModule() {
-
-		if ( this._compositeModule ) return this._compositeModule;
-		this._compositeModule = new ShaderModule( {
-			name: 'underwater-composite',
-			deps: [ this.module ],
-			bindings: { underwaterMediumTex: { texture: () => this.mediumTexture }, underwaterShaftTex: { texture: () => this.shaftTarget.texture } },
-			code: this._compositeCode(),
-		} );
-		return this._compositeModule;
-
-	}
-
-	_code() {
-
-		return /* wgsl */`
+			code: /* wgsl */`
 const UW_STRADDLE: f32 = ${ f32s( STRADDLE ) };
 const UW_BAND: i32 = ${ BAND };
 const UW_IOR: f32 = ${ f32s( IOR ) };
@@ -188,7 +164,45 @@ fn _uwDepthAt( uv: vec2f ) -> f32 {
 	let size = vec2f( textureDimensions( underwaterDepth ) );
 	return textureLoad( underwaterDepth, vec2i( clamp( uv, vec2f( 0.0 ), vec2f( 0.9999 ) ) * size ), 0 );
 }
+`,
+		} );
+		return this._baseModule;
 
+	}
+
+	// the shader module (built on first use: the other systems' modules must exist by then)
+	get module() {
+
+		if ( this._module ) return this._module;
+		this._module = new ShaderModule( {
+			name: 'underwater',
+			deps: [ this.baseModule, this.query && this.query.module, this.caustics && this.caustics.module, flashModule ].filter( Boolean ),
+			bindings: {
+				underwaterMask: { texture: () => this.maskTexture },
+			},
+			code: this._code(),
+		} );
+		return this._module;
+
+	}
+
+	// the composite (needs the medium texture: not usable by the medium pass itself)
+	get compositeModule() {
+
+		if ( this._compositeModule ) return this._compositeModule;
+		this._compositeModule = new ShaderModule( {
+			name: 'underwater-composite',
+			deps: [ this.baseModule ],
+			bindings: { underwaterMediumTex: { texture: () => this.mediumTexture }, underwaterShaftTex: { texture: () => this.shaftTarget.texture } },
+			code: this._compositeCode(),
+		} );
+		return this._compositeModule;
+
+	}
+
+	_code() {
+
+		return /* wgsl */`
 // Medium at the near clip plane for each pixel (1: water, 0: air).
 //  - a water surface in view: the side it is seen from (written by the water material) is the
 //    medium between the lens and the surface
@@ -219,7 +233,6 @@ fn underwaterMedium( uv: vec2f ) -> f32 {
 	}
 	return water;
 }
-
 `;
 
 	}

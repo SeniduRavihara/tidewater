@@ -108,7 +108,8 @@ fn waterSurfaceCascadeAttenuation( c: i32, depth: f32 ) -> f32 {
 
 		const fft = this.fft;
 		const C = fft.cascades;
-		const T = !! this.terrain, SH = !! this.shore, WK = !! this.wake, DT = !! this.detail;
+		const limit16 = ( GPU.limits?.maxSampledTexturesPerShaderStage || 16 ) <= 16;
+		const T = !! this.terrain, SH = !! this.shore, WK = ! limit16 && !! this.wake, DT = !! this.detail;
 		const SF = this.surfFoam;
 		const SIM = !! this.shoreSim;
 		const cd = this.cdlod.module.name;
@@ -385,7 +386,7 @@ ${ SF ? /* wgsl */`
 
 		return new ShaderModule( {
 			name: 'waterSurface',
-			deps: [ commonModule, fft.module, this.cdlod.module, this.attenuationModule, T && this.terrain.module, SH && this.shore.module,
+			deps: [ commonModule, fft.module, this.cdlod.module, this.attenuationModule, T && ( this.terrain.surfaceModule || this.terrain.module ), SH && this.shore.module,
 				WK && this.wake.module, DT && this.detail.module, SF && SF.module ],
 			uniforms: this.params,
 			uniformName: 'waterSurface',

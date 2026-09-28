@@ -680,19 +680,14 @@ fn cloudsShadow( worldXZ: vec2f ) -> f32 {
 `,
 		} );
 
-		// public sampling module (sky, environment, water, materials)
-		this.module = new ShaderModule( {
-			name: 'clouds',
-			deps: [ commonModule, helpers, this.shadowModule ],
-			uniforms: this.params,
-			uniformName: 'cloudsParams',
+		// public sampling module for low-res panorama (sky reflections, water)
+		this.panoramaModule = new ShaderModule( {
+			name: 'cloudsPanorama',
+			deps: [ commonModule ],
 			bindings: {
 				cloudsPanorama: { texture: this.panorama },
-				cloudsView: { texture: () => this.viewTex },
 			},
 			code: /* wgsl */`
-${ catmullRomWGSL( 'cloudsViewCatmullRom', 'cloudsView' ) }
-
 // vec4(rgb in-scattered radiance, a transmittance) for a view direction (panorama)
 fn cloudsSample( dir: vec3f ) -> vec4f {
 	let az = atan2( dir.z, dir.x );
@@ -705,6 +700,20 @@ fn cloudsSample( dir: vec3f ) -> vec4f {
 	let below = smoothstep( -0.07, -0.03, dir.y );
 	return vec4f( s.rgb * below, mix( 1.0, s.a, below ) );
 }
+`,
+		} );
+
+		// public sampling module (sky, environment, water, materials)
+		this.module = new ShaderModule( {
+			name: 'clouds',
+			deps: [ commonModule, helpers, this.shadowModule, this.panoramaModule ],
+			uniforms: this.params,
+			uniformName: 'cloudsParams',
+			bindings: {
+				cloudsView: { texture: () => this.viewTex },
+			},
+			code: /* wgsl */`
+${ catmullRomWGSL( 'cloudsViewCatmullRom', 'cloudsView' ) }
 
 // Full resolution clouds for the main background. The view texture is looked up with the camera
 // it was traced with (it can lag behind: underwater frames skip the tracing); directions outside

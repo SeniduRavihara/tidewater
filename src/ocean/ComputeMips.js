@@ -1,10 +1,13 @@
-import { ComputeKernel } from '../engine/webgpu.js';
+import { ComputeKernel, GPU } from '../engine/webgpu.js';
 
 // Box-filtered mip chain of a square power-of-two 2d / 2d-array / cube texture in two compute
 // dispatches, instead of a render pass per level and layer (generateMipmaps):
 //   A: 16x16 threads per 32x32 tile of level 0 -> levels 1..5 through workgroup memory
 //   B: one workgroup per layer: level 5 -> the rest of the chain
 // The texture needs 'storage' usage and a storage-capable float format (e.g. rgba16float).
+//
+// On devices with maxStorageTexturesPerShaderStage < 5 (e.g. Intel integrated GPUs where the limit is 4),
+// falls back to single-storage-texture downsample passes per level.
 //
 //   const mips = new ComputeMips( tex, 'label' );
 //   GPU.computePass( 'x', ( pass ) => mips.dispatch( pass ) );   // or mips.dispatch() (own pass)
@@ -17,9 +20,48 @@ export class ComputeMips {
 		this.res = res;
 		this.layers = tex.dimension === '3d' ? 1 : tex.depth;
 		const levels = tex.mipLevelCount;
-		const top = Math.min( 5, levels - 1 );
 		const out = ( l ) => ( { storageTexture: tex, access: 'write', view: { dimension: '2d-array', baseMipLevel: l, mipLevelCount: 1 } } );
 		const src = ( l ) => ( { texture: tex, view: { dimension: '2d-array', baseMipLevel: l, mipLevelCount: 1 } } );
+
+		const maxStorage = GPU.limits?.maxStorageTexturesPerShaderStage ?? ( GPU.device?.limits?.maxStorageTexturesPerShaderStage ?? 4 );
+		if ( maxStorage < 5 ) {
+
+			this.stepKernels = [];
+			for ( let l = 1; l < levels; l ++ ) {
+
+				const targetSize = res >> l;
+				const wg = Math.min( 8, Math.max( 1, targetSize ) );
+				const disX = Math.ceil( targetSize / wg );
+				const disY = Math.ceil( targetSize / wg );
+				const kernel = new ComputeKernel( {
+					label: `${ label } mips ${ l }`,
+					bindings: {
+						src: src( l - 1 ),
+						dst: out( l ),
+					},
+					workgroupSize: [ wg, wg, 1 ],
+					code: /* wgsl */`
+@compute @workgroup_size( WG_X, WG_Y, WG_Z )
+fn main( @builtin( global_invocation_id ) gid: vec3u ) {
+	let targetSize = ${ targetSize }u;
+	if ( gid.x >= targetSize || gid.y >= targetSize ) { return; }
+	let p = gid.xy * 2u;
+	let layer = gid.z;
+	let v = ( textureLoad( src, p, layer, 0 )
+	        + textureLoad( src, p + vec2u( 1u, 0u ), layer, 0 )
+	        + textureLoad( src, p + vec2u( 0u, 1u ), layer, 0 )
+	        + textureLoad( src, p + vec2u( 1u, 1u ), layer, 0 ) ) * 0.25;
+	textureStore( dst, gid.xy, layer, v );
+}`,
+				} );
+				this.stepKernels.push( { kernel, dispatch: [ disX, disY, this.layers ] } );
+
+			}
+			return;
+
+		}
+
+		const top = Math.min( 5, levels - 1 );
 		// threads (lx, ly) < width reduce 2x2 of `from` (row 2 * width) into level lvl (and `to`)
 		const reduce = ( from, to, width, lvl ) => /* wgsl */`
 	if ( lx < ${ width }u && ly < ${ width }u ) {
@@ -99,6 +141,17 @@ ${ codeB }
 	dispatch( pass = null ) {
 
 		const o = pass ? { pass } : undefined;
+		if ( this.stepKernels ) {
+
+			for ( let i = 0; i < this.stepKernels.length; i ++ ) {
+
+				const k = this.stepKernels[ i ];
+				k.kernel.dispatch( k.dispatch, o );
+
+			}
+			return;
+
+		}
 		this.kernelA.dispatch( [ this.res / 32, this.res / 32, this.layers ], o );
 		if ( this.kernelB ) this.kernelB.dispatch( [ 1, 1, this.layers ], o );
 

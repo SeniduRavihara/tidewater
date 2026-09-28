@@ -53,6 +53,28 @@ export class Sky {
 
 	}
 
+	get moonSkyModule() {
+
+		if ( this._moonSkyModule ) return this._moonSkyModule;
+		this._moonSkyModule = new ShaderModule( {
+			name: 'sky-moon-sky',
+			uniforms: this.params,
+			uniformName: 'skyParams',
+			code: /* wgsl */`
+fn skyMoonSky( dir: vec3f ) -> vec3f {
+	let cosA = dot( dir, skyParams.moonDir );
+	let ang = acos( clamp( cosA, -1.0, 1.0 ) );
+	let aureole = exp( ang * -14.0 ) * 2.4 + exp( ang * -2.5 ) * 0.9;
+	let grad = mix( 1.7, 1.0, sat( dir.y * 3.0 ) );
+	let up = smoothstep( -0.05, 0.15, skyParams.moonDir.y );
+	return vec3f( 0.005, 0.0068, 0.0105 ) * ( grad + aureole ) * frame.night * up;
+}
+`,
+		} );
+		return this._moonSkyModule;
+
+	}
+
 	get module() {
 
 		if ( ! this._module ) this._module = this._buildModule();
@@ -64,7 +86,7 @@ export class Sky {
 
 		const clouds = this.clouds;
 		const deps = [ commonModule, this.atmosphere.module ];
-		if ( clouds ) deps.push( clouds.module );
+		if ( clouds ) deps.push( clouds.panoramaModule || clouds.module );
 		const composite = ( sampler ) => clouds
 			? `let c = ${ sampler }( dir );\n\treturn base * c.a + c.rgb;`
 			: 'return base;';
@@ -209,7 +231,7 @@ fn skyViewRadiance( dir: vec3f ) -> vec3f {
 
 			const pass = new FullscreenPass( {
 				label: 'sky background',
-				modules: [ this.module ],
+				modules: [ this.module, this.clouds && this.clouds.module ].filter( Boolean ),
 				colorFormats: SCENE_FORMATS,
 				depthFormat: DEPTH_FORMAT,
 				depthCompare: 'equal',
